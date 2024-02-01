@@ -153,7 +153,7 @@
 #elif FMT_MSC_VERSION && !_HAS_EXCEPTIONS
 #  define FMT_EXCEPTIONS 0
 #else
-#  define FMT_EXCEPTIONS 1
+#  define FMT_EXCEPTIONS 0
 #endif
 #if FMT_EXCEPTIONS
 #  define FMT_TRY try
