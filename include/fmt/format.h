@@ -38,32 +38,34 @@
 #  define FMT_REMOVE_TRANSITIVE_INCLUDES
 #endif
 
-#include <cmath>             // std::signbit
-#include <cstdint>           // uint32_t
-#include <cstring>           // std::memcpy
-#include <initializer_list>  // std::initializer_list
-#include <limits>            // std::numeric_limits
-#if defined(__GLIBCXX__) && !defined(_GLIBCXX_USE_DUAL_ABI)
-// Workaround for pre gcc 5 libstdc++.
-#  include <memory>  // std::allocator_traits
-#endif
-#include <stdexcept>     // std::runtime_error
-#include <string>        // std::string
-#include <system_error>  // std::system_error
-
 #include "base.h"
 
+#ifndef FMT_MODULE
+#  include <cmath>             // std::signbit
+#  include <cstdint>           // uint32_t
+#  include <cstring>           // std::memcpy
+#  include <initializer_list>  // std::initializer_list
+#  include <limits>            // std::numeric_limits
+#  if defined(__GLIBCXX__) && !defined(_GLIBCXX_USE_DUAL_ABI)
+// Workaround for pre gcc 5 libstdc++.
+#    include <memory>  // std::allocator_traits
+#  endif
+#  include <stdexcept>     // std::runtime_error
+#  include <string>        // std::string
+#  include <system_error>  // std::system_error
+
 // Checking FMT_CPLUSPLUS for warning suppression in MSVC.
-#if FMT_HAS_INCLUDE(<bit>) && FMT_CPLUSPLUS > 201703L
-#  include <bit>  // std::bit_cast
-#endif
+#  if FMT_HAS_INCLUDE(<bit>) && FMT_CPLUSPLUS > 201703L
+#    include <bit>  // std::bit_cast
+#  endif
 
 // libc++ supports string_view in pre-c++17.
-#if FMT_HAS_INCLUDE(<string_view>) && \
-    (FMT_CPLUSPLUS >= 201703L || defined(_LIBCPP_VERSION))
-#  include <string_view>
-#  define FMT_USE_STRING_VIEW
-#endif
+#  if FMT_HAS_INCLUDE(<string_view>) && \
+      (FMT_CPLUSPLUS >= 201703L || defined(_LIBCPP_VERSION))
+#    include <string_view>
+#    define FMT_USE_STRING_VIEW
+#  endif
+#endif  // FMT_MODULE
 
 #if defined __cpp_inline_variables && __cpp_inline_variables >= 201606L
 #  define FMT_INLINE_VARIABLE inline
@@ -103,6 +105,13 @@
 #else
 #  define FMT_NOINLINE
 #endif
+
+namespace std {
+template <> struct iterator_traits<fmt::appender> {
+  using iterator_category = output_iterator_tag;
+  using value_type = char;
+};
+}  // namespace std
 
 #ifndef FMT_THROW
 #  if FMT_EXCEPTIONS
@@ -544,6 +553,7 @@ constexpr auto to_pointer(OutputIt, size_t) -> T* {
 template <typename T> auto to_pointer(basic_appender<T> it, size_t n) -> T* {
   buffer<T>& buf = get_container(it);
   auto size = buf.size();
+  buf.try_reserve(size + n);
   if (buf.capacity() < size + n) return nullptr;
   buf.try_resize(size + n);
   return buf.data() + size;
@@ -553,7 +563,7 @@ template <typename OutputIt,
           FMT_ENABLE_IF(is_back_insert_iterator<OutputIt>::value&&
                             is_contiguous<typename OutputIt::container>::value)>
 inline auto base_iterator(OutputIt it,
-                          typename OutputIt::containter_type::value_type*)
+                          typename OutputIt::container_type::value_type*)
     -> OutputIt {
   return it;
 }
@@ -761,28 +771,22 @@ using is_integer =
 #  define FMT_USE_LONG_DOUBLE 1
 #endif
 
-#ifndef FMT_USE_FLOAT128
-#  ifdef __clang__
-// Clang emulates GCC, so it has to appear early.
-#    if FMT_HAS_INCLUDE(<quadmath.h>)
-#      define FMT_USE_FLOAT128 1
-#    endif
-#  elif defined(__GNUC__)
-// GNU C++:
-#    if defined(_GLIBCXX_USE_FLOAT128) && !defined(__STRICT_ANSI__)
-#      define FMT_USE_FLOAT128 1
-#    endif
-#  endif
-#  ifndef FMT_USE_FLOAT128
-#    define FMT_USE_FLOAT128 0
-#  endif
+#if defined(FMT_USE_FLOAT128)
+// Use the provided definition.
+#elif FMT_CLANG_VERSION && FMT_HAS_INCLUDE(<quadmath.h>)
+#  define FMT_USE_FLOAT128 1
+#elif FMT_GCC_VERSION && defined(_GLIBCXX_USE_FLOAT128) && \
+    !defined(__STRICT_ANSI__)
+#  define FMT_USE_FLOAT128 1
+#else
+#  define FMT_USE_FLOAT128 0
 #endif
-
 #if FMT_USE_FLOAT128
 using float128 = __float128;
 #else
 using float128 = void;
 #endif
+
 template <typename T> using is_float128 = std::is_same<T, float128>;
 
 template <typename T>
@@ -814,25 +818,17 @@ FMT_BEGIN_EXPORT
 enum { inline_buffer_size = 500 };
 
 /**
-  \rst
-  A dynamically growing memory buffer for trivially copyable/constructible types
-  with the first ``SIZE`` elements stored in the object itself.
-
-  You can use the ``memory_buffer`` type alias for ``char`` instead.
-
-  **Example**::
-
-     auto out = fmt::memory_buffer();
-     fmt::format_to(std::back_inserter(out), "The answer is {}.", 42);
-
-  This will append the following output to the ``out`` object:
-
-  .. code-block:: none
-
-     The answer is 42.
-
-  The output can be converted to an ``std::string`` with ``to_string(out)``.
-  \endrst
+ * A dynamically growing memory buffer for trivially copyable/constructible
+ * types with the first `SIZE` elements stored in the object itself. Most
+ * commonly used via the `memory_buffer` alias for `char`.
+ *
+ * **Example**:
+ *
+ *     auto out = fmt::memory_buffer();
+ *     fmt::format_to(std::back_inserter(out), "The answer is {}.", 42);
+ *
+ * This will append "The answer is 42." to `out`. The buffer content can be
+ * converted to `std::string` with `to_string(out)`.
  */
 template <typename T, size_t SIZE = inline_buffer_size,
           typename Allocator = std::allocator<T>>
@@ -905,22 +901,14 @@ class basic_memory_buffer : public detail::buffer<T> {
   }
 
  public:
-  /**
-    \rst
-    Constructs a :class:`fmt::basic_memory_buffer` object moving the content
-    of the other object to it.
-    \endrst
-   */
+  /// Constructs a `basic_memory_buffer` object moving the content of the other
+  /// object to it.
   FMT_CONSTEXPR20 basic_memory_buffer(basic_memory_buffer&& other) noexcept
       : detail::buffer<T>(grow) {
     move(other);
   }
 
-  /**
-    \rst
-    Moves the content of the other ``basic_memory_buffer`` object to this one.
-    \endrst
-   */
+  /// Moves the content of the other `basic_memory_buffer` object to this one.
   auto operator=(basic_memory_buffer&& other) noexcept -> basic_memory_buffer& {
     FMT_ASSERT(this != &other, "");
     deallocate();
@@ -931,13 +919,11 @@ class basic_memory_buffer : public detail::buffer<T> {
   // Returns a copy of the allocator associated with this buffer.
   auto get_allocator() const -> Allocator { return alloc_; }
 
-  /**
-    Resizes the buffer to contain *count* elements. If T is a POD type new
-    elements may not be initialized.
-   */
+  /// Resizes the buffer to contain `count` elements. If T is a POD type new
+  /// elements may not be initialized.
   FMT_CONSTEXPR20 void resize(size_t count) { this->try_resize(count); }
 
-  /** Increases the buffer capacity to *new_capacity*. */
+  /// Increases the buffer capacity to `new_capacity`.
   void reserve(size_t new_capacity) { this->try_reserve(new_capacity); }
 
   using detail::buffer<T>::append;
@@ -966,7 +952,7 @@ FMT_BEGIN_EXPORT
 #  pragma clang diagnostic ignored "-Wweak-vtables"
 #endif
 
-/** An error reported from a formatting function. */
+/// An error reported from a formatting function.
 class FMT_SO_VISIBILITY("default") format_error : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
@@ -1088,6 +1074,8 @@ template <typename Locale> class format_facet : public Locale::facet {
   }
 };
 
+FMT_END_EXPORT
+
 namespace detail {
 
 // Returns true if value is negative, false otherwise.
@@ -1139,7 +1127,7 @@ template <typename Char, typename Sign> constexpr auto sign(Sign s) -> Char {
 #if !FMT_GCC_VERSION || FMT_GCC_VERSION >= 604
   static_assert(std::is_same<Sign, sign_t>::value, "");
 #endif
-  return static_cast<Char>("\0-+ "[s]);
+  return static_cast<char>(((' ' << 24) | ('+' << 16) | ('-' << 8)) >> (s * 8));
 }
 
 template <typename T> FMT_CONSTEXPR auto count_digits_fallback(T n) -> int {
@@ -1187,9 +1175,7 @@ inline auto do_count_digits(uint64_t n) -> int {
 // except for n == 0 in which case count_digits returns 1.
 FMT_CONSTEXPR20 inline auto count_digits(uint64_t n) -> int {
 #ifdef FMT_BUILTIN_CLZLL
-  if (!is_constant_evaluated()) {
-    return do_count_digits(n);
-  }
+  if (!is_constant_evaluated()) return do_count_digits(n);
 #endif
   return count_digits_fallback(n);
 }
@@ -1297,45 +1283,49 @@ FMT_CONSTEXPR20 FMT_INLINE void copy2(Char* dst, const char* src) {
   *dst = static_cast<Char>(*src);
 }
 
-template <typename Iterator> struct format_decimal_result {
-  Iterator begin;
-  Iterator end;
-};
-
-// Formats a decimal unsigned integer value writing into out pointing to a
-// buffer of specified size. The caller must ensure that the buffer is large
-// enough.
+// Formats a decimal unsigned integer value writing to out pointing to a buffer
+// of specified size. The caller must ensure that the buffer is large enough.
 template <typename Char, typename UInt>
-FMT_CONSTEXPR20 auto format_decimal(Char* out, UInt value, int size)
-    -> format_decimal_result<Char*> {
+FMT_CONSTEXPR20 auto do_format_decimal(Char* out, UInt value, int size)
+    -> Char* {
   FMT_ASSERT(size >= count_digits(value), "invalid digit count");
-  out += size;
-  Char* end = out;
+  unsigned n = to_unsigned(size);
   while (value >= 100) {
     // Integer division is slow so do it for a group of two digits instead
     // of for every digit. The idea comes from the talk by Alexandrescu
     // "Three Optimization Tips for C++". See speed-test for a comparison.
-    out -= 2;
-    copy2(out, digits2(static_cast<size_t>(value % 100)));
+    n -= 2;
+    copy2(out + n, digits2(static_cast<unsigned>(value % 100)));
     value /= 100;
   }
-  if (value < 10) {
-    *--out = static_cast<Char>('0' + value);
-    return {out, end};
+  if (value >= 10) {
+    n -= 2;
+    copy2(out + n, digits2(static_cast<unsigned>(value)));
+  } else {
+    out[--n] = static_cast<Char>('0' + value);
   }
-  out -= 2;
-  copy2(out, digits2(static_cast<size_t>(value)));
-  return {out, end};
+  return out + n;
 }
 
-template <typename Char, typename UInt, typename Iterator,
-          FMT_ENABLE_IF(!std::is_pointer<remove_cvref_t<Iterator>>::value)>
-FMT_CONSTEXPR inline auto format_decimal(Iterator out, UInt value, int size)
-    -> format_decimal_result<Iterator> {
+template <typename Char, typename UInt>
+FMT_CONSTEXPR FMT_INLINE auto format_decimal(Char* out, UInt value,
+                                             int num_digits) -> Char* {
+  do_format_decimal(out, value, num_digits);
+  return out + num_digits;
+}
+
+template <typename Char, typename UInt, typename OutputIt,
+          FMT_ENABLE_IF(is_back_insert_iterator<OutputIt>::value)>
+FMT_CONSTEXPR auto format_decimal(OutputIt out, UInt value, int num_digits)
+    -> OutputIt {
+  if (auto ptr = to_pointer<Char>(out, to_unsigned(num_digits))) {
+    do_format_decimal(ptr, value, num_digits);
+    return out;
+  }
   // Buffer is large enough to hold all digits (digits10 + 1).
-  Char buffer[digits10<UInt>() + 1] = {};
-  auto end = format_decimal(buffer, value, size).end;
-  return {out, detail::copy_noinline<Char>(buffer, end, out)};
+  char buffer[digits10<UInt>() + 1] = {};
+  do_format_decimal(buffer, value, num_digits);
+  return detail::copy_noinline<Char>(buffer, buffer + num_digits, out);
 }
 
 template <unsigned BASE_BITS, typename Char, typename UInt>
@@ -1352,9 +1342,10 @@ FMT_CONSTEXPR auto format_uint(Char* buffer, UInt value, int num_digits,
   return end;
 }
 
-template <unsigned BASE_BITS, typename Char, typename It, typename UInt>
-FMT_CONSTEXPR inline auto format_uint(It out, UInt value, int num_digits,
-                                      bool upper = false) -> It {
+template <unsigned BASE_BITS, typename Char, typename OutputIt, typename UInt,
+          FMT_ENABLE_IF(is_back_insert_iterator<OutputIt>::value)>
+FMT_CONSTEXPR inline auto format_uint(OutputIt out, UInt value, int num_digits,
+                                      bool upper = false) -> OutputIt {
   if (auto ptr = to_pointer<Char>(out, to_unsigned(num_digits))) {
     format_uint<BASE_BITS>(ptr, value, num_digits, upper);
     return out;
@@ -1803,7 +1794,7 @@ auto find_escape(const Char* begin, const Char* end)
 
 inline auto find_escape(const char* begin, const char* end)
     -> find_escape_result<char> {
-  if (!is_utf8()) return find_escape<char>(begin, end);
+  if (!use_utf8()) return find_escape<char>(begin, end);
   auto result = find_escape_result<char>{end, nullptr, 0};
   for_each_codepoint(string_view(begin, to_unsigned(end - begin)),
                      [&](uint32_t cp, string_view sv) {
@@ -1831,14 +1822,12 @@ inline auto find_escape(const char* begin, const char* end)
   }()
 
 /**
-  \rst
-  Constructs a compile-time format string from a string literal *s*.
-
-  **Example**::
-
-    // A compile-time error because 'd' is an invalid specifier for strings.
-    std::string s = fmt::format(FMT_STRING("{:d}"), "foo");
-  \endrst
+ * Constructs a compile-time format string from a string literal `s`.
+ *
+ * **Example**:
+ *
+ *     // A compile-time error because 'd' is an invalid specifier for strings.
+ *     std::string s = fmt::format(FMT_STRING("{:d}"), "foo");
  */
 #define FMT_STRING(s) FMT_STRING_IMPL(s, fmt::detail::compile_string, )
 
@@ -2183,7 +2172,7 @@ FMT_CONSTEXPR FMT_INLINE auto write_int(OutputIt out, write_int_arg<T> arg,
     int num_digits = count_digits(abs_value);
     return write_int<Char>(
         out, num_digits, prefix, specs, [=](reserve_iterator<OutputIt> it) {
-          return format_decimal<Char>(it, abs_value, num_digits).end;
+          return format_decimal<Char>(it, abs_value, num_digits);
         });
   }
   case presentation_type::hex: {
@@ -2218,7 +2207,6 @@ FMT_CONSTEXPR FMT_INLINE auto write_int(OutputIt out, write_int_arg<T> arg,
   case presentation_type::chr:
     return write_char<Char>(out, static_cast<Char>(abs_value), specs);
   }
-  return out;
 }
 template <typename Char, typename OutputIt, typename T>
 FMT_CONSTEXPR FMT_NOINLINE auto write_int_noinline(OutputIt out,
@@ -2252,46 +2240,6 @@ FMT_CONSTEXPR FMT_INLINE auto write(OutputIt out, T value,
                          loc);
 }
 
-// An output iterator that counts the number of objects written to it and
-// discards them.
-class counting_iterator {
- private:
-  size_t count_;
-
- public:
-  using iterator_category = std::output_iterator_tag;
-  using difference_type = std::ptrdiff_t;
-  using pointer = void;
-  using reference = void;
-  FMT_UNCHECKED_ITERATOR(counting_iterator);
-
-  struct value_type {
-    template <typename T> FMT_CONSTEXPR void operator=(const T&) {}
-  };
-
-  FMT_CONSTEXPR counting_iterator() : count_(0) {}
-
-  FMT_CONSTEXPR auto count() const -> size_t { return count_; }
-
-  FMT_CONSTEXPR auto operator++() -> counting_iterator& {
-    ++count_;
-    return *this;
-  }
-  FMT_CONSTEXPR auto operator++(int) -> counting_iterator {
-    auto it = *this;
-    ++*this;
-    return it;
-  }
-
-  FMT_CONSTEXPR friend auto operator+(counting_iterator it, difference_type n)
-      -> counting_iterator {
-    it.count_ += static_cast<size_t>(n);
-    return it;
-  }
-
-  FMT_CONSTEXPR auto operator*() const -> value_type { return {}; }
-};
-
 template <typename Char, typename OutputIt>
 FMT_CONSTEXPR auto write(OutputIt out, basic_string_view<Char> s,
                          const format_specs& specs) -> OutputIt {
@@ -2302,7 +2250,11 @@ FMT_CONSTEXPR auto write(OutputIt out, basic_string_view<Char> s,
   bool is_debug = specs.type == presentation_type::debug;
   size_t width = 0;
 
-  if (is_debug) size = write_escaped_string(counting_iterator{}, s).count();
+  if (is_debug) {
+    auto buf = counting_buffer<Char>();
+    write_escaped_string(basic_appender<Char>(buf), s);
+    size = buf.count();
+  }
 
   if (specs.width != 0) {
     if (is_debug)
@@ -2342,15 +2294,13 @@ FMT_CONSTEXPR auto write(OutputIt out, T value) -> OutputIt {
   if (negative) abs_value = ~abs_value + 1;
   int num_digits = count_digits(abs_value);
   auto size = (negative ? 1 : 0) + static_cast<size_t>(num_digits);
-  auto it = reserve(out, size);
-  if (auto ptr = to_pointer<Char>(it, size)) {
+  if (auto ptr = to_pointer<Char>(out, size)) {
     if (negative) *ptr++ = static_cast<Char>('-');
     format_decimal<Char>(ptr, abs_value, num_digits);
     return out;
   }
-  if (negative) *it++ = static_cast<Char>('-');
-  it = format_decimal<Char>(it, abs_value, num_digits).end;
-  return base_iterator(out, it);
+  if (negative) *out++ = static_cast<Char>('-');
+  return format_decimal<Char>(out, abs_value, num_digits);
 }
 
 // DEPRECATED!
@@ -2481,7 +2431,7 @@ constexpr auto write_significand(OutputIt out, const char* significand,
 template <typename Char, typename OutputIt, typename UInt>
 inline auto write_significand(OutputIt out, UInt significand,
                               int significand_size) -> OutputIt {
-  return format_decimal<Char>(out, significand, significand_size).end;
+  return format_decimal<Char>(out, significand, significand_size);
 }
 template <typename Char, typename OutputIt, typename T, typename Grouping>
 FMT_CONSTEXPR20 auto write_significand(OutputIt out, T significand,
@@ -2501,8 +2451,7 @@ template <typename Char, typename UInt,
           FMT_ENABLE_IF(std::is_integral<UInt>::value)>
 inline auto write_significand(Char* out, UInt significand, int significand_size,
                               int integral_size, Char decimal_point) -> Char* {
-  if (!decimal_point)
-    return format_decimal(out, significand, significand_size).end;
+  if (!decimal_point) return format_decimal(out, significand, significand_size);
   out += significand_size + 1;
   Char* end = out;
   int floating_size = significand_size - integral_size;
@@ -2697,7 +2646,7 @@ FMT_CONSTEXPR20 auto write_float(OutputIt out, const DecimalFP& f,
 }
 
 template <typename T> constexpr auto isnan(T value) -> bool {
-  return !(value >= value);  // std::isnan doesn't support __float128.
+  return value != value;  // std::isnan doesn't support __float128.
 }
 
 template <typename T, typename Enable = void>
@@ -3104,8 +3053,11 @@ FMT_CONSTEXPR20 inline void format_dragon(basic_fp<uint128_t> value,
   // Generate the given number of digits.
   exp10 -= num_digits - 1;
   if (num_digits <= 0) {
-    denominator *= 10;
-    auto digit = add_compare(numerator, numerator, denominator) > 0 ? '1' : '0';
+    auto digit = '0';
+    if (num_digits == 0) {
+      denominator *= 10;
+      digit = add_compare(numerator, numerator, denominator) > 0 ? '1' : '0';
+    }
     buf.push_back(digit);
     return;
   }
@@ -3651,9 +3603,7 @@ auto write(OutputIt out, monostate, format_specs = {}, locale_ref = {})
 template <typename Char, typename OutputIt>
 FMT_CONSTEXPR auto write(OutputIt out, basic_string_view<Char> value)
     -> OutputIt {
-  auto it = reserve(out, value.size());
-  it = copy_noinline<Char>(value.begin(), value.end(), it);
-  return base_iterator(out, it);
+  return copy_noinline<Char>(value.begin(), value.end(), out);
 }
 
 template <typename Char, typename OutputIt, typename T,
@@ -3720,7 +3670,9 @@ FMT_CONSTEXPR auto write(OutputIt out, const T& value) -> enable_if_t<
 template <typename Char, typename OutputIt, typename T,
           typename Context = basic_format_context<OutputIt, Char>>
 FMT_CONSTEXPR auto write(OutputIt out, const T& value)
-    -> enable_if_t<mapped_type_constant<T, Context>::value == type::custom_type,
+    -> enable_if_t<mapped_type_constant<T, Context>::value ==
+                           type::custom_type &&
+                       !std::is_fundamental<T>::value,
                    OutputIt> {
   auto formatter = typename Context::template formatter_type<T>();
   auto parse_ctx = typename Context::parse_context_type({});
@@ -3884,25 +3836,24 @@ FMT_API void report_error(format_func func, int error_code,
                           const char* message) noexcept;
 }  // namespace detail
 
+FMT_BEGIN_EXPORT
 FMT_API auto vsystem_error(int error_code, string_view format_str,
                            format_args args) -> std::system_error;
 
 /**
-  \rst
-  Constructs :class:`std::system_error` with a message formatted with
-  ``fmt::format(fmt, args...)``.
-  *error_code* is a system error code as given by ``errno``.
-
-  **Example**::
-
-    // This throws std::system_error with the description
-    //   cannot open file 'madeup': No such file or directory
-    // or similar (system message may vary).
-    const char* filename = "madeup";
-    std::FILE* file = std::fopen(filename, "r");
-    if (!file)
-      throw fmt::system_error(errno, "cannot open file '{}'", filename);
-  \endrst
+ * Constructs `std::system_error` with a message formatted with
+ * `fmt::format(fmt, args...)`.
+ * `error_code` is a system error code as given by `errno`.
+ *
+ * **Example**:
+ *
+ *     // This throws std::system_error with the description
+ *     //   cannot open file 'madeup': No such file or directory
+ *     // or similar (system message may vary).
+ *     const char* filename = "madeup";
+ *     std::FILE* file = std::fopen(filename, "r");
+ *     if (!file)
+ *       throw fmt::system_error(errno, "cannot open file '{}'", filename);
  */
 template <typename... T>
 auto system_error(int error_code, format_string<T...> fmt, T&&... args)
@@ -3911,20 +3862,17 @@ auto system_error(int error_code, format_string<T...> fmt, T&&... args)
 }
 
 /**
-  \rst
-  Formats an error message for an error returned by an operating system or a
-  language runtime, for example a file opening error, and writes it to *out*.
-  The format is the same as the one used by ``std::system_error(ec, message)``
-  where ``ec`` is ``std::error_code(error_code, std::generic_category()})``.
-  It is implementation-defined but normally looks like:
-
-  .. parsed-literal::
-     *<message>*: *<system-message>*
-
-  where *<message>* is the passed message and *<system-message>* is the system
-  message corresponding to the error code.
-  *error_code* is a system error code as given by ``errno``.
-  \endrst
+ * Formats an error message for an error returned by an operating system or a
+ * language runtime, for example a file opening error, and writes it to `out`.
+ * The format is the same as the one used by `std::system_error(ec, message)`
+ * where `ec` is `std::error_code(error_code, std::generic_category())`.
+ * It is implementation-defined but normally looks like:
+ *
+ *     <message>: <system-message>
+ *
+ * where `<message>` is the passed message and `<system-message>` is the system
+ * message corresponding to the error code.
+ * `error_code` is a system error code as given by `errno`.
  */
 FMT_API void format_system_error(detail::buffer<char>& out, int error_code,
                                  const char* message) noexcept;
@@ -3933,7 +3881,7 @@ FMT_API void format_system_error(detail::buffer<char>& out, int error_code,
 // Can be used to report errors from destructors.
 FMT_API void report_system_error(int error_code, const char* message) noexcept;
 
-/** Fast integer formatter. */
+/// A fast integer formatter.
 class format_int {
  private:
   // Buffer should be large enough to hold all digits (digits10 + 1),
@@ -3942,12 +3890,14 @@ class format_int {
   mutable char buffer_[buffer_size];
   char* str_;
 
-  template <typename UInt> auto format_unsigned(UInt value) -> char* {
+  template <typename UInt>
+  FMT_CONSTEXPR20 auto format_unsigned(UInt value) -> char* {
     auto n = static_cast<detail::uint32_or_64_or_128_t<UInt>>(value);
-    return detail::format_decimal(buffer_, n, buffer_size - 1).begin;
+    return detail::do_format_decimal(buffer_, n, buffer_size - 1);
   }
 
-  template <typename Int> auto format_signed(Int value) -> char* {
+  template <typename Int>
+  FMT_CONSTEXPR20 auto format_signed(Int value) -> char* {
     auto abs_value = static_cast<detail::uint32_or_64_or_128_t<Int>>(value);
     bool negative = value < 0;
     if (negative) abs_value = 0 - abs_value;
@@ -3957,39 +3907,35 @@ class format_int {
   }
 
  public:
-  explicit format_int(int value) : str_(format_signed(value)) {}
-  explicit format_int(long value) : str_(format_signed(value)) {}
-  explicit format_int(long long value) : str_(format_signed(value)) {}
-  explicit format_int(unsigned value) : str_(format_unsigned(value)) {}
-  explicit format_int(unsigned long value) : str_(format_unsigned(value)) {}
-  explicit format_int(unsigned long long value)
+  explicit FMT_CONSTEXPR20 format_int(int value) : str_(format_signed(value)) {}
+  explicit FMT_CONSTEXPR20 format_int(long value)
+      : str_(format_signed(value)) {}
+  explicit FMT_CONSTEXPR20 format_int(long long value)
+      : str_(format_signed(value)) {}
+  explicit FMT_CONSTEXPR20 format_int(unsigned value)
+      : str_(format_unsigned(value)) {}
+  explicit FMT_CONSTEXPR20 format_int(unsigned long value)
+      : str_(format_unsigned(value)) {}
+  explicit FMT_CONSTEXPR20 format_int(unsigned long long value)
       : str_(format_unsigned(value)) {}
 
-  /** Returns the number of characters written to the output buffer. */
-  auto size() const -> size_t {
+  /// Returns the number of characters written to the output buffer.
+  FMT_CONSTEXPR20 auto size() const -> size_t {
     return detail::to_unsigned(buffer_ - str_ + buffer_size - 1);
   }
 
-  /**
-    Returns a pointer to the output buffer content. No terminating null
-    character is appended.
-   */
-  auto data() const -> const char* { return str_; }
+  /// Returns a pointer to the output buffer content. No terminating null
+  /// character is appended.
+  FMT_CONSTEXPR20 auto data() const -> const char* { return str_; }
 
-  /**
-    Returns a pointer to the output buffer content with terminating null
-    character appended.
-   */
-  auto c_str() const -> const char* {
+  /// Returns a pointer to the output buffer content with terminating null
+  /// character appended.
+  FMT_CONSTEXPR20 auto c_str() const -> const char* {
     buffer_[buffer_size - 1] = '\0';
     return str_;
   }
 
-  /**
-    \rst
-    Returns the content of the output buffer as an ``std::string``.
-    \endrst
-   */
+  /// Returns the content of the output buffer as an `std::string`.
   auto str() const -> std::string { return std::string(str_, size()); }
 };
 
@@ -3998,14 +3944,19 @@ struct formatter<T, Char, enable_if_t<detail::has_format_as<T>::value>>
     : formatter<detail::format_as_t<T>, Char> {
   template <typename FormatContext>
   auto format(const T& value, FormatContext& ctx) const -> decltype(ctx.out()) {
-    using base = formatter<detail::format_as_t<T>, Char>;
-    return base::format(format_as(value), ctx);
+    auto&& val = format_as(value);  // Make an lvalue reference for format.
+    return formatter<detail::format_as_t<T>, Char>::format(val, ctx);
   }
 };
 
-#define FMT_FORMAT_AS(Type, Base) \
-  template <typename Char>        \
-  struct formatter<Type, Char> : formatter<Base, Char> {}
+#define FMT_FORMAT_AS(Type, Base)                                              \
+  template <typename Char>                                                     \
+  struct formatter<Type, Char> : formatter<Base, Char> {                       \
+    template <typename FormatContext>                                          \
+    auto format(Type value, FormatContext& ctx) const -> decltype(ctx.out()) { \
+      return formatter<Base, Char>::format(value, ctx);                        \
+    }                                                                          \
+  }
 
 FMT_FORMAT_AS(signed char, int);
 FMT_FORMAT_AS(unsigned char, unsigned);
@@ -4014,22 +3965,23 @@ FMT_FORMAT_AS(unsigned short, unsigned);
 FMT_FORMAT_AS(long, detail::long_type);
 FMT_FORMAT_AS(unsigned long, detail::ulong_type);
 FMT_FORMAT_AS(Char*, const Char*);
-FMT_FORMAT_AS(std::basic_string<Char>, basic_string_view<Char>);
 FMT_FORMAT_AS(std::nullptr_t, const void*);
 FMT_FORMAT_AS(detail::std_string_view<Char>, basic_string_view<Char>);
 FMT_FORMAT_AS(void*, const void*);
+
+template <typename Char, typename Traits, typename Allocator>
+class formatter<std::basic_string<Char, Traits, Allocator>, Char>
+    : public formatter<basic_string_view<Char>, Char> {};
 
 template <typename Char, size_t N>
 struct formatter<Char[N], Char> : formatter<basic_string_view<Char>, Char> {};
 
 /**
-  \rst
-  Converts ``p`` to ``const void*`` for pointer formatting.
-
-  **Example**::
-
-    auto s = fmt::format("{}", fmt::ptr(p));
-  \endrst
+ * Converts `p` to `const void*` for pointer formatting.
+ *
+ * **Example**:
+ *
+ *     auto s = fmt::format("{}", fmt::ptr(p));
  */
 template <typename T> auto ptr(T p) -> const void* {
   static_assert(std::is_pointer<T>::value, "");
@@ -4037,14 +3989,12 @@ template <typename T> auto ptr(T p) -> const void* {
 }
 
 /**
-  \rst
-  Converts ``e`` to the underlying type.
-
-  **Example**::
-
-    enum class color { red, green, blue };
-    auto s = fmt::format("{}", fmt::underlying(color::red));
-  \endrst
+ * Converts `e` to the underlying type.
+ *
+ * **Example**:
+ *
+ *     enum class color { red, green, blue };
+ *     auto s = fmt::format("{}", fmt::underlying(color::red));
  */
 template <typename Enum>
 constexpr auto underlying(Enum e) noexcept -> underlying_t<Enum> {
@@ -4095,15 +4045,13 @@ template <typename T> struct group_digits_view {
 };
 
 /**
-  \rst
-  Returns a view that formats an integer value using ',' as a locale-independent
-  thousands separator.
-
-  **Example**::
-
-    fmt::print("{}", fmt::group_digits(12345));
-    // Output: "12,345"
-  \endrst
+ * Returns a view that formats an integer value using ',' as a
+ * locale-independent thousands separator.
+ *
+ * **Example**:
+ *
+ *     fmt::print("{}", fmt::group_digits(12345));
+ *     // Output: "12,345"
  */
 template <typename T> auto group_digits(T value) -> group_digits_view<T> {
   return {value};
@@ -4128,39 +4076,44 @@ template <typename T> struct formatter<group_digits_view<T>> : formatter<T> {
                                                        specs.width_ref, ctx);
     detail::handle_dynamic_spec<detail::precision_checker>(
         specs.precision, specs.precision_ref, ctx);
-    return detail::write_int(ctx.out(),
-                             static_cast<detail::uint64_or_128_t<T>>(t.value),
-                             0, specs, detail::digit_grouping<char>("\3", ","));
+    auto arg = detail::make_write_int_arg(t.value, specs.sign);
+    return detail::write_int(
+        ctx.out(), static_cast<detail::uint64_or_128_t<T>>(arg.abs_value),
+        arg.prefix, specs, detail::digit_grouping<char>("\3", ","));
   }
 };
 
-template <typename T> struct nested_view {
-  const formatter<T>* fmt;
+template <typename T, typename Char> struct nested_view {
+  const formatter<T, Char>* fmt;
   const T* value;
 };
 
-template <typename T> struct formatter<nested_view<T>> {
-  FMT_CONSTEXPR auto parse(format_parse_context& ctx) -> const char* {
+template <typename T, typename Char>
+struct formatter<nested_view<T, Char>, Char> {
+  template <typename ParseContext>
+  FMT_CONSTEXPR auto parse(ParseContext& ctx) -> decltype(ctx.begin()) {
     return ctx.begin();
   }
-  auto format(nested_view<T> view, format_context& ctx) const
+  template <typename FormatContext>
+  auto format(nested_view<T, Char> view, FormatContext& ctx) const
       -> decltype(ctx.out()) {
     return view.fmt->format(*view.value, ctx);
   }
 };
 
-template <typename T> struct nested_formatter {
+template <typename T, typename Char = char> struct nested_formatter {
  private:
   int width_;
   detail::fill_t fill_;
   align_t align_ : 4;
-  formatter<T> formatter_;
+  formatter<T, Char> formatter_;
 
  public:
   constexpr nested_formatter() : width_(0), align_(align_t::none) {}
 
-  FMT_CONSTEXPR auto parse(format_parse_context& ctx) -> const char* {
-    auto specs = detail::dynamic_format_specs<char>();
+  FMT_CONSTEXPR auto parse(basic_format_parse_context<Char>& ctx)
+      -> decltype(ctx.begin()) {
+    auto specs = detail::dynamic_format_specs<Char>();
     auto it = parse_format_specs(ctx.begin(), ctx.end(), specs, ctx,
                                  detail::type::none_type);
     width_ = specs.width;
@@ -4170,34 +4123,30 @@ template <typename T> struct nested_formatter {
     return formatter_.parse(ctx);
   }
 
-  template <typename F>
-  auto write_padded(format_context& ctx, F write) const -> decltype(ctx.out()) {
+  template <typename FormatContext, typename F>
+  auto write_padded(FormatContext& ctx, F write) const -> decltype(ctx.out()) {
     if (width_ == 0) return write(ctx.out());
-    auto buf = memory_buffer();
-    write(appender(buf));
+    auto buf = basic_memory_buffer<Char>();
+    write(basic_appender<Char>(buf));
     auto specs = format_specs();
     specs.width = width_;
     specs.fill = fill_;
     specs.align = align_;
-    return detail::write<char>(ctx.out(), string_view(buf.data(), buf.size()),
-                               specs);
+    return detail::write<Char>(
+        ctx.out(), basic_string_view<Char>(buf.data(), buf.size()), specs);
   }
 
-  auto nested(const T& value) const -> nested_view<T> {
-    return nested_view<T>{&formatter_, &value};
+  auto nested(const T& value) const -> nested_view<T, Char> {
+    return nested_view<T, Char>{&formatter_, &value};
   }
 };
 
 /**
-  \rst
-  Converts *value* to ``std::string`` using the default format for type *T*.
-
-  **Example**::
-
-    #include <fmt/format.h>
-
-    std::string answer = fmt::to_string(42);
-  \endrst
+ * Converts `value` to `std::string` using the default format for type `T`.
+ *
+ * **Example**:
+ *
+ *     std::string answer = fmt::to_string(42);
  */
 template <typename T, FMT_ENABLE_IF(!std::is_integral<T>::value &&
                                     !detail::has_format_as<T>::value)>
@@ -4256,8 +4205,7 @@ void vformat_to(buffer<Char>& buf, basic_string_view<Char> fmt,
         : parse_context(str), context(p_out, p_args, p_loc) {}
 
     void on_text(const Char* begin, const Char* end) {
-      auto text = basic_string_view<Char>(begin, to_unsigned(end - begin));
-      context.advance_to(write<Char>(context.out(), text));
+      context.advance_to(copy_noinline<Char>(begin, end, context.out()));
     }
 
     FMT_CONSTEXPR auto on_arg_id() -> int {
@@ -4299,7 +4247,7 @@ void vformat_to(buffer<Char>& buf, basic_string_view<Char> fmt,
       return begin;
     }
 
-    void on_error(const char* message) { report_error(message); }
+    FMT_NORETURN void on_error(const char* message) { report_error(message); }
   };
   detail::parse_format_string<false>(fmt, format_handler(out, fmt, args, loc));
 }
@@ -4318,19 +4266,41 @@ extern template FMT_API auto decimal_point_impl(locale_ref) -> char;
 extern template FMT_API auto decimal_point_impl(locale_ref) -> wchar_t;
 #endif  // FMT_HEADER_ONLY
 
+FMT_END_EXPORT
+
+template <typename T, typename Char, type TYPE>
+template <typename FormatContext>
+FMT_CONSTEXPR FMT_INLINE auto native_formatter<T, Char, TYPE>::format(
+    const T& val, FormatContext& ctx) const -> decltype(ctx.out()) {
+  if (specs_.width_ref.kind == arg_id_kind::none &&
+      specs_.precision_ref.kind == arg_id_kind::none) {
+    return write<Char>(ctx.out(), val, specs_, ctx.locale());
+  }
+  auto specs = specs_;
+  handle_dynamic_spec<width_checker>(specs.width, specs.width_ref, ctx);
+  handle_dynamic_spec<precision_checker>(specs.precision, specs.precision_ref,
+                                         ctx);
+  return write<Char>(ctx.out(), val, specs, ctx.locale());
+}
+
 }  // namespace detail
+
+FMT_BEGIN_EXPORT
+
+template <typename Char>
+struct formatter<detail::float128, Char>
+    : detail::native_formatter<detail::float128, Char,
+                               detail::type::float_type> {};
 
 #if FMT_USE_USER_DEFINED_LITERALS
 inline namespace literals {
 /**
-  \rst
-  User-defined literal equivalent of :func:`fmt::arg`.
-
-  **Example**::
-
-    using namespace fmt::literals;
-    fmt::print("Elapsed time: {s:.2f} seconds", "s"_a=1.23);
-  \endrst
+ * User-defined literal equivalent of `fmt::arg`.
+ *
+ * **Example**:
+ *
+ *     using namespace fmt::literals;
+ *     fmt::print("The answer is {answer}.", "answer"_a=42);
  */
 #  if FMT_USE_NONTYPE_TEMPLATE_ARGS
 template <detail_exported::fixed_string Str> constexpr auto operator""_a() {
@@ -4348,16 +4318,14 @@ constexpr auto operator""_a(const char* s, size_t) -> detail::udl_arg<char> {
 FMT_API auto vformat(string_view fmt, format_args args) -> std::string;
 
 /**
-  \rst
-  Formats ``args`` according to specifications in ``fmt`` and returns the result
-  as a string.
-
-  **Example**::
-
-    #include <fmt/core.h>
-    std::string message = fmt::format("The answer is {}.", 42);
-  \endrst
-*/
+ * Formats `args` according to specifications in `fmt` and returns the result
+ * as a string.
+ *
+ * **Example**:
+ *
+ *     #include <fmt/format.h>
+ *     std::string message = fmt::format("The answer is {}.", 42);
+ */
 template <typename... T>
 FMT_NODISCARD FMT_INLINE auto format(format_string<T...> fmt, T&&... args)
     -> std::string {
@@ -4408,26 +4376,6 @@ FMT_NODISCARD FMT_INLINE auto formatted_size(const Locale& loc,
 }
 
 FMT_END_EXPORT
-
-template <typename T, typename Char>
-template <typename FormatContext>
-FMT_CONSTEXPR FMT_INLINE auto
-formatter<T, Char,
-          enable_if_t<detail::type_constant<T, Char>::value !=
-                      detail::type::custom_type>>::format(const T& val,
-                                                          FormatContext& ctx)
-    const -> decltype(ctx.out()) {
-  if (specs_.width_ref.kind == detail::arg_id_kind::none &&
-      specs_.precision_ref.kind == detail::arg_id_kind::none) {
-    return detail::write<Char>(ctx.out(), val, specs_, ctx.locale());
-  }
-  auto specs = specs_;
-  detail::handle_dynamic_spec<detail::width_checker>(specs.width,
-                                                     specs.width_ref, ctx);
-  detail::handle_dynamic_spec<detail::precision_checker>(
-      specs.precision, specs.precision_ref, ctx);
-  return detail::write<Char>(ctx.out(), val, specs, ctx.locale());
-}
 
 FMT_END_NAMESPACE
 

@@ -8,17 +8,19 @@
 #ifndef FMT_FORMAT_INL_H_
 #define FMT_FORMAT_INL_H_
 
-#include <algorithm>
-#include <cerrno>  // errno
-#include <climits>
-#include <cmath>
-#include <exception>
+#ifndef FMT_MODULE
+#  include <algorithm>
+#  include <cerrno>  // errno
+#  include <climits>
+#  include <cmath>
+#  include <exception>
 
-#ifndef FMT_STATIC_THOUSANDS_SEPARATOR
-#  include <locale>
+#  if !defined(FMT_STATIC_THOUSANDS_SEPARATOR)
+#    include <locale>
+#  endif
 #endif
 
-#if defined(_WIN32) && !defined(FMT_WINDOWS_NO_WCHAR)
+#if defined(_WIN32) && !defined(FMT_USE_WRITE_CONSOLE)
 #  include <io.h>  // _isatty
 #endif
 
@@ -110,7 +112,11 @@ template <typename Char> FMT_FUNC Char decimal_point_impl(locale_ref) {
 
 FMT_FUNC auto write_loc(appender out, loc_value value,
                         const format_specs& specs, locale_ref loc) -> bool {
-#ifndef FMT_STATIC_THOUSANDS_SEPARATOR
+#ifdef FMT_STATIC_THOUSANDS_SEPARATOR
+  value.visit(loc_writer<>{
+      out, specs, std::string(1, FMT_STATIC_THOUSANDS_SEPARATOR), "\3", "."});
+  return true;
+#else
   auto locale = loc.get<std::locale>();
   // We cannot use the num_put<char> facet because it may produce output in
   // a wrong encoding.
@@ -119,7 +125,6 @@ FMT_FUNC auto write_loc(appender out, loc_value value,
     return std::use_facet<facet>(locale).put(out, value, specs);
   return facet(locale).put(out, value, specs);
 #endif
-  return false;
 }
 }  // namespace detail
 
@@ -1438,11 +1443,25 @@ template <typename T> struct span {
   size_t size;
 };
 
-#ifdef _WIN32
-inline void flockfile(FILE* f) { _lock_file(f); }
-inline void funlockfile(FILE* f) { _unlock_file(f); }
-inline int getc_unlocked(FILE* f) { return _fgetc_nolock(f); }
+template <typename F> auto flockfile(F* f) -> decltype(_lock_file(f)) {
+  _lock_file(f);
+}
+template <typename F> auto funlockfile(F* f) -> decltype(_unlock_file(f)) {
+  _unlock_file(f);
+}
+
+#ifndef getc_unlocked
+template <typename F> auto getc_unlocked(F* f) -> decltype(_fgetc_nolock(f)) {
+  return _fgetc_nolock(f);
+}
 #endif
+
+template <typename F = FILE, typename Enable = void>
+struct has_flockfile : std::false_type {};
+
+template <typename F>
+struct has_flockfile<F, void_t<decltype(flockfile(&std::declval<F&>()))>>
+    : std::true_type {};
 
 // A FILE wrapper. F is FILE defined as a template parameter to make system API
 // detection work.
@@ -1595,19 +1614,34 @@ template <typename F> class fallback_file : public file_base<F> {
   }
 };
 
-template <typename F, FMT_ENABLE_IF(sizeof(F::_p) != 0)>
+#ifndef FMT_USE_FALLBACK_FILE
+#  define FMT_USE_FALLBACK_FILE 0
+#endif
+
+template <typename F,
+          FMT_ENABLE_IF(sizeof(F::_p) != 0 && !FMT_USE_FALLBACK_FILE)>
 auto get_file(F* f, int) -> apple_file<F> {
   return f;
 }
-template <typename F, FMT_ENABLE_IF(sizeof(F::_IO_read_ptr) != 0)>
+template <typename F,
+          FMT_ENABLE_IF(sizeof(F::_IO_read_ptr) != 0 && !FMT_USE_FALLBACK_FILE)>
 inline auto get_file(F* f, int) -> glibc_file<F> {
   return f;
 }
+
 inline auto get_file(FILE* f, ...) -> fallback_file<FILE> { return f; }
 
 using file_ref = decltype(get_file(static_cast<FILE*>(nullptr), 0));
 
+template <typename F = FILE, typename Enable = void>
 class file_print_buffer : public buffer<char> {
+ public:
+  explicit file_print_buffer(F*) : buffer(nullptr, size_t()) {}
+};
+
+template <typename F>
+class file_print_buffer<F, enable_if_t<has_flockfile<F>::value>>
+    : public buffer<char> {
  private:
   file_ref file_;
 
@@ -1622,7 +1656,7 @@ class file_print_buffer : public buffer<char> {
   }
 
  public:
-  explicit file_print_buffer(FILE* f) : buffer(grow, size_t()), file_(f) {
+  explicit file_print_buffer(F* f) : buffer(grow, size_t()), file_(f) {
     flockfile(f);
     file_.init_buffer();
     auto buf = file_.get_write_buffer();
@@ -1631,12 +1665,13 @@ class file_print_buffer : public buffer<char> {
   ~file_print_buffer() {
     file_.advance_write_buffer(size());
     bool flush = file_.needs_flush();
-    funlockfile(file_);
+    F* f = file_;    // Make funlockfile depend on the template parameter F
+    funlockfile(f);  // for the system API detection to work.
     if (flush) fflush(file_);
   }
 };
 
-#if !defined(_WIN32) || defined(FMT_WINDOWS_NO_WCHAR)
+#if !defined(_WIN32) || defined(FMT_USE_WRITE_CONSOLE)
 FMT_FUNC auto write_console(int, string_view) -> bool { return false; }
 #else
 using dword = conditional_t<sizeof(long) == 4, unsigned long, unsigned>;
@@ -1662,7 +1697,7 @@ FMT_FUNC void vprint_mojibake(std::FILE* f, string_view fmt, format_args args,
 #endif
 
 FMT_FUNC void print(std::FILE* f, string_view text) {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(FMT_USE_WRITE_CONSOLE)
   int fd = _fileno(f);
   if (_isatty(fd)) {
     std::fflush(f);
@@ -1673,14 +1708,17 @@ FMT_FUNC void print(std::FILE* f, string_view text) {
 }
 }  // namespace detail
 
-FMT_FUNC void vprint(std::FILE* f, string_view fmt, format_args args) {
-  if (detail::file_ref(f).is_buffered()) {
-    auto&& buffer = detail::file_print_buffer(f);
-    return detail::vformat_to(buffer, fmt, args);
-  }
+FMT_FUNC void vprint_buffered(std::FILE* f, string_view fmt, format_args args) {
   auto buffer = memory_buffer();
   detail::vformat_to(buffer, fmt, args);
   detail::print(f, {buffer.data(), buffer.size()});
+}
+
+FMT_FUNC void vprint(std::FILE* f, string_view fmt, format_args args) {
+  if (!detail::file_ref(f).is_buffered() || !detail::has_flockfile<>())
+    return vprint_buffered(f, fmt, args);
+  auto&& buffer = detail::file_print_buffer<>(f);
+  return detail::vformat_to(buffer, fmt, args);
 }
 
 FMT_FUNC void vprintln(std::FILE* f, string_view fmt, format_args args) {
