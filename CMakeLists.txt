@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.8...3.28)
 
+option(FMT_MSVC_STATIC_RUNTIME
+  "Link static runtime libraries"
+  ON)
+if( FMT_MSVC_STATIC_RUNTIME)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
 # Fallback for using newer policies on CMake <3.12.
 if (${CMAKE_VERSION} VERSION_LESS 3.12)
   cmake_policy(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION})
@@ -372,6 +381,7 @@ target_include_directories(fmt-header-only
   ${FMT_SYSTEM_HEADERS_ATTRIBUTE} INTERFACE
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${FMT_INC_DIR}>)
+
 
 # Install targets.
 if (FMT_INSTALL)

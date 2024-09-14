@@ -20,3 +20,8 @@ fmt-*.cmake
 fmt.pc
 virtualenv
 MODULE.bazel.lock
+
+build-debug
+install
+
+run-msbuild.bat
