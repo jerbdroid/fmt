@@ -8,7 +8,7 @@ cc_library(
     hdrs = glob([
         "include/fmt/*.h",
     ]),
-    copts = ["/EHs"],
+    copts = ["/EHs", "/utf-8"],
     includes = [
         "include",
     ],
